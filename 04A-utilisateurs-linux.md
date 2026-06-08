@@ -1,4 +1,4 @@
-# 03 — Autoriser uniquement certains utilisateurs
+# 04 — Autoriser uniquement certains utilisateurs
 
 ## 1. Créer un utilisateur FTP
 
