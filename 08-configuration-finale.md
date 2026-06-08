@@ -9,8 +9,8 @@ Fichier :
 Configuration recommandée :
 
 ```conf
-listen=NO
-listen_ipv6=YES
+listen=YES
+listen_ipv6=NO
 
 anonymous_enable=NO
 local_enable=YES
