@@ -11,8 +11,7 @@ sudo nano /etc/vsftpd.conf
 Remplacer ou adapter le fichier avec cette configuration :
 
 ```conf
-listen=NO
-listen_ipv6=YES
+listen=YES
 
 anonymous_enable=NO
 local_enable=YES
