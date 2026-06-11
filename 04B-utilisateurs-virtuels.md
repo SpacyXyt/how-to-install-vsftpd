@@ -1,139 +1,112 @@
-# 04B — Utilisateurs virtuels vsftpd
+# 04B - Utilisateurs virtuels avec vsftpd
 
-Cette méthode permet de créer des utilisateurs FTP qui ne sont pas des utilisateurs Linux.
-
-## Objectif
-
-Avoir des comptes FTP séparés du système Linux.
+Cette configuration permet de créer des comptes FTP qui ne sont pas des
+utilisateurs Linux. Tous les comptes virtuels sont exécutés par un compte
+Linux technique nommé `ftpvirtual`.
 
 Exemple :
 
-```txt
-client1 = utilisateur FTP uniquement
-client2 = utilisateur FTP uniquement
-ftpvirtual = utilisateur Linux technique
-````
+```text
+client1     utilisateur FTP uniquement
+client2     utilisateur FTP uniquement
+ftpvirtual  utilisateur Linux technique
+```
 
-Les utilisateurs `client1` et `client2` n’existent pas dans Linux.
+> FTP transmet les identifiants en clair. En production, activez TLS/FTPS ou
+> utilisez SFTP lorsque c'est possible.
 
-Ils sont seulement utilisés par `vsftpd`.
-
----
-
-# 1. Installer les paquets nécessaires
+## 1. Installer les paquets
 
 ```bash
 sudo apt update
-sudo apt install vsftpd apache2-utils libpam-pwdfile -y
+sudo apt install -y vsftpd libpam-pwdfile openssl
 ```
 
-Paquets utilisés :
+`openssl` sert ici a produire des hashes Unix SHA-512 (`$6$`) compatibles avec
+`pam_pwdfile`. N'utilisez pas les hashes Apache APR1 (`$apr1$`) : ils ne sont
+pas pris en charge par la version actuelle de `libpam-pwdfile` sur Debian 13.
 
-```txt
-vsftpd          serveur FTP
-apache2-utils   outil htpasswd
-libpam-pwdfile  authentification PAM via fichier de mots de passe
-```
-
----
-
-# 2. Créer l’utilisateur Linux technique
-
-Cet utilisateur ne sert pas à se connecter directement.
-
-Il sert uniquement à donner une identité Linux aux utilisateurs virtuels.
+## 2. Creer l'utilisateur Linux technique
 
 ```bash
-sudo useradd -d /srv/ftp -s /usr/sbin/nologin ftpvirtual
-```
-
-Créer le dossier principal :
-
-```bash
+sudo useradd --system --home-dir /srv/ftp --shell /usr/sbin/nologin ftpvirtual
 sudo mkdir -p /srv/ftp
 sudo chown root:root /srv/ftp
 sudo chmod 755 /srv/ftp
-```
-
-Vérifier l’utilisateur technique :
-
-```bash
 id ftpvirtual
 ```
 
----
+Le compte `ftpvirtual` ne sert jamais a se connecter directement.
 
-# 3. Créer le fichier des utilisateurs virtuels
+## 3. Creer les utilisateurs virtuels
 
-Créer le dossier de configuration :
-
-```bash
-sudo mkdir -p /etc/vsftpd
-```
-
-Créer le premier utilisateur virtuel :
+Creer le fichier protege :
 
 ```bash
-sudo htpasswd -c /etc/vsftpd/virtual_users client1
-```
-
-Ajouter un autre utilisateur virtuel :
-
-```bash
-sudo htpasswd /etc/vsftpd/virtual_users client2
-```
-
-Ne pas remettre `-c` pour les utilisateurs suivants, sinon le fichier sera écrasé.
-
-Sécuriser le fichier :
-
-```bash
+sudo install -d -o root -g root -m 755 /etc/vsftpd
+sudo touch /etc/vsftpd/virtual_users
 sudo chown root:root /etc/vsftpd/virtual_users
 sudo chmod 600 /etc/vsftpd/virtual_users
 ```
 
-Voir les utilisateurs virtuels :
+Ajouter `client1` :
+
+Cette commande suppose que `client1` n’est pas deja present. Verifier avec :
 
 ```bash
-sudo cat /etc/vsftpd/virtual_users
+sudo grep -q "^client1:" /etc/vsftpd/virtual_users && echo "client1 existe deja"
 ```
-
----
-
-# 4. Créer la configuration PAM
-
-Créer un fichier PAM dédié :
 
 ```bash
-sudo nano /etc/pam.d/vsftpd-virtual
+read -rsp 'Mot de passe FTP : ' FTP_PASSWORD; echo
+HASH=$(printf '%s' "$FTP_PASSWORD" | openssl passwd -6 -stdin)
+unset FTP_PASSWORD
+printf 'client1:%s\n' "$HASH" | sudo tee -a /etc/vsftpd/virtual_users >/dev/null
+unset HASH
 ```
 
-Mettre :
+Reprendre ces commandes en remplaçant `client1` pour ajouter d'autres comptes.
+Le fichier doit contenir une seule ligne par compte :
+
+```text
+client1:$6$...
+client2:$6$...
+```
+
+Verifier les noms sans afficher les hashes :
+
+```bash
+sudo cut -d: -f1 /etc/vsftpd/virtual_users
+```
+
+## 4. Configurer PAM
+
+Creer `/etc/pam.d/vsftpd-virtual` :
 
 ```pam
 auth required pam_pwdfile.so pwdfile /etc/vsftpd/virtual_users
 account required pam_permit.so
 ```
 
----
-
-# 5. Sauvegarder la configuration vsftpd actuelle
+Commandes equivalentes :
 
 ```bash
-sudo cp /etc/vsftpd.conf /etc/vsftpd.conf.backup
+printf '%s\n' \
+  'auth required pam_pwdfile.so pwdfile /etc/vsftpd/virtual_users' \
+  'account required pam_permit.so' \
+  | sudo tee /etc/pam.d/vsftpd-virtual >/dev/null
+sudo chmod 644 /etc/pam.d/vsftpd-virtual
 ```
 
----
+## 5. Configurer vsftpd
 
-# 6. Configurer vsftpd pour les utilisateurs virtuels
-
-Ouvrir la configuration :
+Sauvegarder la configuration actuelle :
 
 ```bash
-sudo nano /etc/vsftpd.conf
+sudo cp -a /etc/vsftpd.conf /etc/vsftpd.conf.backup
 ```
 
-Configuration recommandée :
+Remplacer `/etc/vsftpd.conf` par :
 
 ```conf
 listen=YES
@@ -142,6 +115,7 @@ listen_ipv6=NO
 anonymous_enable=NO
 local_enable=YES
 write_enable=YES
+local_umask=022
 
 guest_enable=YES
 guest_username=ftpvirtual
@@ -150,7 +124,7 @@ virtual_use_local_privs=YES
 pam_service_name=vsftpd-virtual
 
 chroot_local_user=YES
-allow_writeable_chroot=YES
+hide_ids=YES
 
 user_sub_token=$USER
 local_root=/srv/ftp/$USER
@@ -163,296 +137,212 @@ xferlog_enable=YES
 log_ftp_protocol=YES
 ```
 
----
+Avec cette configuration, `client1` arrive dans `/srv/ftp/client1` et
+`client2` dans `/srv/ftp/client2`.
 
-# 7. Explication des options importantes
-
-## Activer les utilisateurs virtuels
-
-```conf
-guest_enable=YES
-guest_username=ftpvirtual
-```
-
-Les utilisateurs virtuels sont mappés sur l’utilisateur Linux technique `ftpvirtual`.
-
-## Utiliser PAM
-
-```conf
-pam_service_name=vsftpd-virtual
-```
-
-`vsftpd` utilise le fichier :
-
-```txt
-/etc/pam.d/vsftpd-virtual
-```
-
-## Créer un dossier différent par utilisateur virtuel
-
-```conf
-user_sub_token=$USER
-local_root=/srv/ftp/$USER
-```
-
-Exemple :
-
-```txt
-client1 arrive dans /srv/ftp/client1
-client2 arrive dans /srv/ftp/client2
-```
-
----
-
-# 8. Créer les dossiers des utilisateurs virtuels
-
-Pour `client1` :
+## 6. Creer les repertoires FTP
 
 ```bash
-sudo mkdir -p /srv/ftp/client1
-sudo chown -R ftpvirtual:ftpvirtual /srv/ftp/client1
-sudo chmod 755 /srv/ftp/client1
+sudo install -d -o root -g root -m 755 /srv/ftp/client1
+sudo install -d -o root -g root -m 755 /srv/ftp/client2
 ```
 
-Pour `client2` :
+Pour permettre l'ecriture tout en gardant une racine de chroot non modifiable,
+il est preferable de creer un sous-repertoire :
 
 ```bash
-sudo mkdir -p /srv/ftp/client2
-sudo chown -R ftpvirtual:ftpvirtual /srv/ftp/client2
-sudo chmod 755 /srv/ftp/client2
+sudo chown root:root /srv/ftp/client1 /srv/ftp/client2
+sudo install -d -o ftpvirtual -g ftpvirtual -m 755 /srv/ftp/client1/files
+sudo install -d -o ftpvirtual -g ftpvirtual -m 755 /srv/ftp/client2/files
 ```
 
----
+La racine reste en `root:root` et seul le sous-dossier `files` est inscriptible par `ftpvirtual`.
 
-# 9. Redémarrer vsftpd
+## 7. Redemarrer et verifier
 
 ```bash
 sudo systemctl restart vsftpd
+sudo systemctl status --no-pager vsftpd
+sudo ss -ltnp | grep ':21 '
 ```
 
-Vérifier le statut :
+Si un pare-feu est actif, autoriser TCP `21` et la plage passive
+`40000:40100`.
 
-```bash
-sudo systemctl status vsftpd
-```
-
----
-
-# 10. Tester la connexion
-
-Depuis le serveur :
+## 8. Tester une connexion
 
 ```bash
 ftp 127.0.0.1
 ```
 
-Identifiants :
+Utiliser `client1` et son mot de passe, puis tester :
 
-```txt
-Utilisateur : client1
-Mot de passe : celui défini avec htpasswd
-```
-
-Tester :
-
-```ftp
+```text
 pwd
 ls
-cd ..
-ls
+cd files
+put fichier-test.txt
 ```
 
-L’utilisateur doit rester bloqué dans son dossier FTP.
-
----
-
-# 11. Ajouter un utilisateur virtuel plus tard
-
-Ajouter l’utilisateur :
+Une verification non interactive est aussi possible :
 
 ```bash
-sudo htpasswd /etc/vsftpd/virtual_users nouveau_client
+curl --user 'client1:mot_de_passe' ftp://127.0.0.1/
 ```
 
-Créer son dossier :
+Attention : placer un mot de passe directement dans une commande peut
+l'enregistrer dans l'historique du shell.
+
+## 9. Ajouter un utilisateur
+
+Les noms sont limites aux lettres, chiffres, points, tirets et underscores.
+Executer le bloc complet :
 
 ```bash
-sudo mkdir -p /srv/ftp/nouveau_client
-sudo chown -R ftpvirtual:ftpvirtual /srv/ftp/nouveau_client
-sudo chmod 755 /srv/ftp/nouveau_client
+USER_NAME=nouveau_client
+if ! printf "%s" "$USER_NAME" | grep -Eq "^[A-Za-z0-9._-]+$"; then
+  echo "Nom utilisateur invalide" >&2
+elif sudo grep -q "^${USER_NAME}:" /etc/vsftpd/virtual_users; then
+  echo "Erreur : ${USER_NAME} existe deja" >&2
+else
+  read -rsp "Mot de passe FTP : " FTP_PASSWORD; echo
+  HASH=$(printf "%s" "$FTP_PASSWORD" | openssl passwd -6 -stdin)
+  unset FTP_PASSWORD
+  printf "%s:%s\n" "$USER_NAME" "$HASH" | sudo tee -a /etc/vsftpd/virtual_users >/dev/null
+  unset HASH
+  sudo install -d -o root -g root -m 755 "/srv/ftp/$USER_NAME"
+  sudo install -d -o ftpvirtual -g ftpvirtual -m 755 "/srv/ftp/$USER_NAME/files"
+fi
+unset USER_NAME
 ```
 
-Redémarrer :
+Le fichier est relu a chaque authentification : aucun redemarrage n’est normalement necessaire.
+
+## 10. Changer un mot de passe
 
 ```bash
-sudo systemctl restart vsftpd
+USER_NAME=client1
+if ! sudo grep -q "^${USER_NAME}:" /etc/vsftpd/virtual_users; then
+  echo "Erreur : ${USER_NAME} n’existe pas" >&2
+else
+  read -rsp "Nouveau mot de passe FTP : " FTP_PASSWORD; echo
+  HASH=$(printf "%s" "$FTP_PASSWORD" | openssl passwd -6 -stdin)
+  unset FTP_PASSWORD
+  sudo sed -i "s|^${USER_NAME}:.*|${USER_NAME}:$HASH|" /etc/vsftpd/virtual_users
+  unset HASH
+fi
+unset USER_NAME
 ```
 
----
+## 11. Supprimer un utilisateur
 
-# 12. Supprimer un utilisateur virtuel
-
-Supprimer l’utilisateur du fichier :
+Sauvegarder puis retirer uniquement sa ligne :
 
 ```bash
-sudo htpasswd -D /etc/vsftpd/virtual_users client1
+sudo cp -a /etc/vsftpd/virtual_users /etc/vsftpd/virtual_users.backup
+sudo sed -i '/^client1:/d' /etc/vsftpd/virtual_users
 ```
 
-Supprimer ou archiver son dossier :
+Archiver ou supprimer ensuite `/srv/ftp/client1` selon la politique de
+conservation des donnees. Si ce chemin est un montage bind, le demonter avant
+toute suppression :
 
 ```bash
-sudo rm -rf /srv/ftp/client1
+mountpoint -q /srv/ftp/client1/files && sudo umount /srv/ftp/client1/files
 ```
 
-Redémarrer :
-
-```bash
-sudo systemctl restart vsftpd
-```
-
----
-
-# 13. Changer le mot de passe d’un utilisateur virtuel
-
-```bash
-sudo htpasswd /etc/vsftpd/virtual_users client1
-```
-
----
-
-# 14. Vérifier qu’un utilisateur virtuel n’existe pas dans Linux
+## 12. Verifier qu'un compte n'existe pas dans Linux
 
 ```bash
 id client1
 ```
 
-Résultat attendu :
+Resultat attendu :
 
-```txt
-id: ‘client1’: no such user
+```text
+id: 'client1': no such user
 ```
 
-Cela confirme que `client1` est uniquement un utilisateur FTP.
+## 13. Donner acces a un dossier web
 
----
-
-# 15. Donner accès à un dossier web
-
-Exemple : `client1` doit gérer un site web situé dans :
-
-```txt
-/var/www/html/client1
-```
-
-Créer le dossier :
+Exemple pour `/var/www/html/client1` :
 
 ```bash
-sudo mkdir -p /var/www/html/client1
+sudo install -d -o ftpvirtual -g www-data -m 2775 /var/www/html/client1
+sudo install -d -o root -g root -m 755 /srv/ftp/client1
+sudo install -d -o ftpvirtual -g ftpvirtual -m 755 /srv/ftp/client1/files
+sudo mount --bind /var/www/html/client1 /srv/ftp/client1/files
 ```
 
-Donner les droits à l’utilisateur technique :
-
-```bash
-sudo chown -R ftpvirtual:www-data /var/www/html/client1
-sudo chmod -R 775 /var/www/html/client1
-```
-
-Remplacer le dossier FTP de `client1` par un lien de montage :
-
-```bash
-sudo rm -rf /srv/ftp/client1
-sudo mkdir -p /srv/ftp/client1
-sudo mount --bind /var/www/html/client1 /srv/ftp/client1
-```
-
-Rendre le montage permanent :
-
-```bash
-sudo nano /etc/fstab
-```
-
-Ajouter :
+Pour rendre le montage permanent, ajouter dans `/etc/fstab` :
 
 ```fstab
-/var/www/html/client1 /srv/ftp/client1 none bind 0 0
+/var/www/html/client1 /srv/ftp/client1/files none bind 0 0
 ```
 
-Tester :
+Puis verifier :
 
 ```bash
 sudo mount -a
+findmnt /srv/ftp/client1/files
 ```
 
----
+## 14. Diagnostic
 
-# 16. Debug
-
-Voir les logs :
+Suivre les authentifications :
 
 ```bash
-sudo journalctl -u vsftpd -f
+sudo journalctl -f | grep -Ei --line-buffered 'vsftpd|pam_pwdfile'
 ```
 
-Voir la configuration active :
+Verifier la configuration utile :
 
 ```bash
 sudo grep -vE '^#|^$' /etc/vsftpd.conf
-```
-
-Vérifier PAM :
-
-```bash
 cat /etc/pam.d/vsftpd-virtual
+sudo cut -d: -f1 /etc/vsftpd/virtual_users
+id ftpvirtual
+namei -l /srv/ftp/client1
 ```
 
-Vérifier le fichier des utilisateurs virtuels :
+Erreurs frequentes :
 
-```bash
-sudo cat /etc/vsftpd/virtual_users
+- `530 Login incorrect` et `wrong password` : hash ou mot de passe incorrect.
+- `530 Login incorrect` et `user unknown` : compte absent du fichier virtuel.
+- `PAM unable to dlopen(pam_pwdfile.so)` : installer `libpam-pwdfile`.
+- `500 OOPS: cannot change directory` : repertoire absent ou droits incorrects.
+- `500 OOPS: refusing to run with writable root inside chroot` : racine de chroot inscriptible ; utiliser un sous-dossier `files`.
+- Connexion possible mais `ls` bloque : plage passive fermee par le pare-feu.
+- `id client1` echoue : comportement normal pour un utilisateur virtuel.
+
+
+## Specifications validees
+
+```text
+Systeme                 Debian 13
+vsftpd                  3.0.5
+libpam-pwdfile          2.0-1+b1
+OpenSSL                 3.5.6
+Authentification        PAM avec fichier passwd
+Hash recommande         SHA-512 crypt ($6$)
+Compte Linux technique  ftpvirtual
+Port de controle        TCP 21
+Ports passifs           TCP 40000 a 40100
+Racine FTP type         /srv/ftp/<utilisateur>
 ```
 
-Vérifier les ports :
+Le hash SHA-512 (`$6$`) a ete valide par une connexion FTP reelle. Le format Unix MD5 (`$1$`) fonctionne aussi mais est moins robuste. Le format Apache APR1 (`$apr1$`) genere par `htpasswd -m` a ete rejete sur cette installation.
 
-```bash
-sudo ss -tulpn | grep :21
-```
+Derriere un NAT, ajouter `pasv_address=ADRESSE_IP_PUBLIQUE` dans `vsftpd.conf` et ouvrir TCP 21 ainsi que TCP 40000 a 40100 sur le pare-feu et le routeur.
 
----
+## Modifications appliquees sur ce serveur
 
-# 17. Configuration finale mode utilisateurs virtuels
+- Installation de `libpam-pwdfile`.
+- Activation de `pam_pwdfile.so` pour les utilisateurs virtuels.
+- Protection de `/etc/vsftpd/virtual_users` en `root:root` avec le mode `600`.
+- Utilisation du compte Linux technique `ftpvirtual`.
+- Correction du hash du compte virtuel `yuto` vers un format Unix compatible.
+- Configuration de la racine de `yuto` sur `/srv/ftp-jail/vboxuser`.
+- Redemarrage de `vsftpd` et validation par une connexion FTP locale.
 
-Fichier :
-
-```txt
-/etc/vsftpd.conf
-```
-
-Contenu :
-
-```conf
-listen=YES
-listen_ipv6=NO
-
-anonymous_enable=NO
-local_enable=YES
-write_enable=YES
-
-guest_enable=YES
-guest_username=ftpvirtual
-virtual_use_local_privs=YES
-
-pam_service_name=vsftpd-virtual
-
-chroot_local_user=YES
-allow_writeable_chroot=YES
-
-user_sub_token=$USER
-local_root=/srv/ftp/$USER
-
-pasv_enable=YES
-pasv_min_port=40000
-pasv_max_port=40100
-
-xferlog_enable=YES
-log_ftp_protocol=YES
-```
+La configuration active de cette machine utilise `pam_service_name=vsftpd`, donc `/etc/pam.d/vsftpd`. La configuration generique du guide utilise `vsftpd-virtual` afin de separer clairement le profil des comptes virtuels.
